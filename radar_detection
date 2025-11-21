@@ -1,0 +1,84 @@
+Here is a clear explanation of the problem statement, contextualized to your radar sequence prediction task:
+
+### Problem Statement Overview
+
+You have a radar system whose state at each moment is described by position (`pos_x`, `pos_y`, `pos_z`), velocity (`vel_x`, `vel_y`, `vel_z`), and its current range to target. Your goal is to predict, based on these input features, **multiple future points in space (where interception or a radar event occurs)** and **the times at which these events happen**.
+
+#### Inputs
+- Three-dimensional position of the radar: `pos_x`, `pos_y`, `pos_z`
+- Three-dimensional velocity of the radar: `vel_x`, `vel_y`, `vel_z`
+- Instantaneous range to the target: `range`
+
+#### Outputs
+- The predicted coordinates for future points (up to four, labeled as `pipx1, pipy1, pipz1, ... pipx4, pipy4, pipz4`). Each set describes an intercept location in 3D space.
+- The predicted time(s) taken to reach each of these points (`tgt_time1, tgt_time2, tgt_time3, tgt_time4`).
+
+### Real-World Context
+
+This kind of problem is common in radar and trajectory prediction research for applications such as air traffic control, autonomous vehicles, or defense systems. The aim is to **forecast the likely future locations and exact moments when the radar or missile will intersect with predicted trajectory points**, given the observed dynamics.[2][5]
+
+### Why Is It Challenging?
+- Multiple outputs: You predict not just a single endpoint, but several possible future waypoints and their times.
+- Sequence dependence: Each prediction may depend on the previous state—hence the use of sequential models (like LSTM).
+- Physical constraints: Your predictions must obey physical laws of motion, and radar data can have noise or nonlinearity.
+
+### Typical Applications
+
+- **Missile target interception**: Given launch position, velocity, and initial range, predict the next points and times of missile/radar intersection.
+- **Aircraft tracking**: Identify location and time where an aircraft will intercept waypoints, based on current state.
+
+### Summary Table
+
+| Purpose             | Inputs                                                                 | Outputs                                                                                           | Application                   |
+|---------------------|------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|-------------------------------|
+| Multi-point, multi-time trajectory prediction | Radar 3D position, velocity, range (`pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, range`) | Predicted 3D intercept points (`pipx1, pipy1, pipz1, ... pipx4, pipy4, pipz4`) and target times | Radar-based guidance, tracking |
+
+Your machine learning model learns to predict **future intercept points and the times to reach them** based on the radar's current position, velocity, and range data.
+
+
+
+An interception point, in the context of radar and guidance systems, is **the specific location in space where a radar-guided object (such as a missile, aircraft, or drone) is expected to meet or cross paths with its moving target**.[6][8]
+
+### Key Characteristics of Interception Points
+- It is computed based on the current position, velocity, and direction of both the interceptor (the radar-guided object) and the target.
+- The interception point is often a predicted location where the "interceptor" can reach the target at the same time, allowing for successful engagement, tracking, or identification.[6]
+- In practical guidance algorithms, this point is dynamically recalculated throughout the mission as both objects move and change velocity, to ensure the most probable success for interception.[8]
+
+### Radar Use Case
+- Radar systems continuously update their target's position and velocity, then calculate where and when their own vehicle or missile needs to be, so their paths cross.
+- The system may predict multiple possible interception points ahead, depending on mission or scenario (like air combat, missile guidance, or trajectory prediction).
+
+### Visual Example
+Imagine an aircraft using radar to home in on another moving aircraft:
+- The radar calculates future "meeting points" in 3D space.
+- The system chooses the optimal one based on speed, heading, and time to target.
+
+In your dataset, each interception point (`pipx1, pipy1, pipz1`, etc.) corresponds to a set of coordinates where the radar-equipped object is expected to reach the moving target based on current dynamics. The associated "target time" entries represent how long it will take to get there.
+
+An interception point, in clear and simple terms, is:
+
+- **The place where a moving object (like an aircraft or missile) and its target are predicted to meet at the same time, based on their current positions and velocities.**
+- In your radar context, it's the exact 3D location where the radar-guided object will reach the target if both maintain their current speed and direction.[11]
+
+#### Visual Scenario
+- Imagine a police car chasing another car. The interception point is where the police car would "catch up" to the other car if both continue on their paths.
+- For radar tracking, the interception point is not just visually projected, but calculated using data about both objects' positions, directions, and speeds.
+
+#### In Your Data
+- Your model predicts several such points (`pipx1, pipy1, pipz1` etc.). Each point is a possible future location where your radar or missile would arrive at the same moment as the target.
+- The corresponding interception time (`tgt_time1` etc.) is how long it would take to get there, starting from the radar's current state.
+
+#### Summary Table
+
+| Term                 | Meaning                                                                                  |
+|----------------------|------------------------------------------------------------------------------------------|
+| Interception Point   | 3D coordinates where the interceptor and target arrive at the same time                  |
+| How predicted        | Using radar's and target's positions, velocities, and directions                         |
+| Example              | Missile and aircraft meet at the same place at the same moment                           |
+| In your model        | `pipx1, pipy1, pipz1` etc. denote each predicted interception location                   |
+
+So, an interception point is simply **where and when the paths of the radar-guided object and its target will cross if both move as currently observed**.
+
+
+[11](https://journals.sagepub.com/doi/10.1177/00202940221118354)
+
