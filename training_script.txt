@@ -1,0 +1,324 @@
+
+# Improved LSTM Training Script with Per-Output Normalization and Better Optimization
+
+from tqdm import tqdm
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.autograd import Variable
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+import os
+from sklearn.model_selection import train_test_split
+import glob as glob
+import time
+
+# Create experiment directory
+file_index = 1
+while os.path.isdir("exp_nov/run%s" % file_index):
+    file_index = file_index + 1
+os.mkdir(f"exp_nov/run{file_index}")
+
+################################### IMPROVED LSTM ARCHITECTURE ########################################################
+
+class LSTMResidualAttn(nn.Module):
+    def __init__(self, num_classes, input_size, hidden_size, num_layers, seq_length):
+        super(LSTMResidualAttn, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Single multi-layer bidirectional LSTM
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.2 if num_layers > 1 else 0.0,
+        )
+
+        # Multi-head attention
+        self.attn = nn.MultiheadAttention(
+            embed_dim=2*hidden_size,
+            num_heads=2,
+            batch_first=True
+        )
+
+        # Project input for residual connection
+        self.input_proj = nn.Linear(input_size, 2*hidden_size)
+
+        # Layer normalization for stability
+        self.norm1 = nn.LayerNorm(2*hidden_size)
+        self.dropout = nn.Dropout(0.2)
+
+        # MLP head
+        self.mlp = nn.Sequential(
+            nn.Linear(2*hidden_size, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, num_classes),
+        )
+
+    def forward(self, x):
+        # x: (B, T, input_size)
+        lstm_out, _ = self.lstm(x)  # (B, T, 2*hidden_size)
+        attn_out, _ = self.attn(lstm_out, lstm_out, lstm_out)  # (B, T, 2*hidden_size)
+
+        # Residual connection + LayerNorm
+        res = self.input_proj(x)  # (B, T, 2*hidden_size)
+        out = self.norm1(attn_out + res)
+        out = self.dropout(out)
+
+        # Use last time step
+        last = out[:, -1, :]  # (B, 2*hidden_size)
+        logits = self.mlp(last)  # (B, num_classes)
+        return logits
+
+####################################################################################################################
+
+def sliding_windows(data, seq_length, stride):
+    x = []
+    for i in range(0, len(data) - seq_length + 1, stride):
+        _x = data[i:(i + seq_length)]
+        x.append(_x)
+    return np.array(x)
+
+####################################################################################################################
+# LOAD DATA
+####################################################################################################################
+
+# file_paths = glob.glob("modified/*")
+file_paths = glob.glob("modified_without_target/*")
+print(f"Found {len(file_paths)} files")
+print(file_paths)
+
+# Hyperparameters
+seq_length = 10
+stride = 2
+input_size = 7
+hidden_size = 64  # Increased from 32
+num_layers = 2
+num_classes = 12  # pipx1, pipy1, pipx2, pipy2, pipx3, pipy3, pipx4, pipy4, tgt_time1-4
+
+X_data = []
+Y_data = []
+
+for i in range(len(file_paths)):
+    training_set = pd.read_csv(file_paths[i], dtype=np.float32)
+
+    # Input features: pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, range
+    features = training_set.iloc[:, [1, 2, 3, 4, 5, 6, 7]]
+
+    # Output targets: 12 columns (8 PIP coordinates + 4 target times)
+    y = training_set.iloc[seq_length - 1:, 8:20].values
+    y = y[::stride]
+
+    x = sliding_windows(features.values, seq_length, stride)
+
+    X_data.append(x)
+    Y_data.append(y)
+
+X_data = np.concatenate(X_data, axis=0)
+Y_data = np.concatenate(Y_data, axis=0)
+
+print(f"X_data shape: {X_data.shape}")  # (N, seq_length, input_size)
+print(f"Y_data shape: {Y_data.shape}")  # (N, num_classes)
+
+####################################################################################################################
+# IMPROVED NORMALIZATION - PER FEATURE AND PER OUTPUT
+####################################################################################################################
+
+# INPUT NORMALIZATION (per feature)
+X_flat = X_data.reshape(-1, input_size)  # (N*seq_len, 7)
+x_mean = X_flat.mean(axis=0)
+x_std = X_flat.std(axis=0) + 1e-6
+
+print(f"\nInput normalization:")
+print(f"x_mean: {x_mean}")
+print(f"x_std: {x_std}")
+
+X_data_norm = (X_data - x_mean) / x_std
+
+# OUTPUT NORMALIZATION (per output dimension) - THIS IS THE KEY FIX
+y_mean = Y_data.mean(axis=0)  # shape (12,)
+y_std = Y_data.std(axis=0) + 1e-6  # shape (12,)
+
+print(f"\nOutput normalization (per column):")
+print(f"y_mean: {y_mean}")
+print(f"y_std: {y_std}")
+
+Y_data_norm = (Y_data - y_mean) / y_std
+
+####################################################################################################################
+# TRAIN/VAL SPLIT
+####################################################################################################################
+
+X_train, X_eval, y_train, y_eval = train_test_split(
+    X_data_norm, Y_data_norm, test_size=0.2, random_state=42, shuffle=True
+)
+
+print(f"\nTrain shape: {X_train.shape}, {y_train.shape}")
+print(f"Eval shape: {X_eval.shape}, {y_eval.shape}")
+
+# Convert to PyTorch tensors
+featuresTrain = torch.from_numpy(X_train).float()
+featuresEval = torch.from_numpy(X_eval).float()
+targetsTrain = torch.from_numpy(y_train).float()
+targetsEval = torch.from_numpy(y_eval).float()
+
+####################################################################################################################
+# MODEL, LOSS, OPTIMIZER
+####################################################################################################################
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"\nUsing device: {device}")
+
+lstm = LSTMResidualAttn(num_classes, input_size, hidden_size, num_layers, seq_length=seq_length)
+lstm = lstm.to(device)
+
+# Use SmoothL1Loss - more robust to outliers than MSE
+criterion = nn.SmoothL1Loss()
+
+# Use AdamW with weight decay for better generalization
+learning_rate = 0.001
+optimizer = torch.optim.AdamW(lstm.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+# Learning rate scheduler
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', patience=8, factor=0.5, verbose=True
+)
+
+####################################################################################################################
+# DATA LOADERS
+####################################################################################################################
+
+batch_size = 64
+num_epochs = 150
+
+train_dataset = torch.utils.data.TensorDataset(featuresTrain, targetsTrain)
+eval_dataset = torch.utils.data.TensorDataset(featuresEval, targetsEval)
+
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size, shuffle=False)
+
+print(f'\nEpochs: {num_epochs}, Batch size: {batch_size}, Iterations per epoch: {len(train_loader)}')
+
+####################################################################################################################
+# TRAINING LOOP WITH FIXES
+####################################################################################################################
+
+train_losses_list = []
+val_losses_list = []
+best_val_loss = float('inf')
+best_epoch = 0
+
+torch.manual_seed(1)
+print(f"\nRESULTS WILL BE SAVED IN exp_nov/run{file_index}")
+
+for epoch in range(num_epochs):
+    # ----- TRAIN -----
+    lstm.train()
+    train_losses = []  # RESET EVERY EPOCH (this was the bug)
+
+    loop = tqdm(train_loader, leave=False, desc=f"Epoch [{epoch+1}/{num_epochs}]")
+
+    for features, labels in loop:
+        features = features.to(device)
+        labels = labels.to(device)
+
+        # Clear gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = lstm(features)
+
+        # Calculate loss
+        loss = criterion(outputs, labels)
+
+        # Backward pass
+        loss.backward()
+
+        # Gradient clipping - prevents explosion on difficult dimensions
+        torch.nn.utils.clip_grad_norm_(lstm.parameters(), max_norm=1.0)
+
+        # Update parameters
+        optimizer.step()
+
+        train_losses.append(loss.item())
+        loop.set_postfix(loss=loss.item())
+
+    train_loss = float(np.mean(train_losses))
+    train_losses_list.append(train_loss)
+
+    # ----- VALIDATION -----
+    lstm.eval()
+    val_losses = []
+
+    with torch.no_grad():
+        for features, labels in val_loader:
+            features = features.to(device)
+            labels = labels.to(device)
+
+            outputs = lstm(features)
+            val_loss = criterion(outputs, labels)
+            val_losses.append(val_loss.item())
+
+    val_loss = float(np.mean(val_losses))
+    val_losses_list.append(val_loss)
+
+    # Step the scheduler
+    scheduler.step(val_loss)
+
+    # Print progress
+    if epoch % 1 == 0:
+        print(f'Epoch {epoch+1}/{num_epochs} - Train loss: {train_loss:.6f} - Val loss: {val_loss:.6f}')
+
+    # Save checkpoint every epoch
+    torch.save({
+        'state_dict': lstm.state_dict(),
+        'model': lstm,
+        'train_loss': train_loss,
+        'val_loss': val_loss,
+        'epoch': epoch + 1,
+        'input_means': x_mean,
+        'input_stds': x_std,
+        'output_means': y_mean,  # Now a vector
+        'output_stds': y_std,    # Now a vector
+    }, f"exp_nov/run{file_index}/ckpt_{epoch}.pt")
+
+    # Save best model
+    if val_loss < best_val_loss:
+        print(f'Validation loss decreased from {best_val_loss:.6f} to {val_loss:.6f}. Saving best model...')
+        best_val_loss = val_loss
+        best_epoch = epoch
+
+        torch.save({
+            'state_dict': lstm.state_dict(),
+            'model': lstm,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'epoch': epoch + 1,
+            'input_means': x_mean,
+            'input_stds': x_std,
+            'output_means': y_mean,
+            'output_stds': y_std,
+        }, f"exp_nov/run{file_index}/best_lstm.pt")
+
+print(f"\nTraining complete! Best epoch: {best_epoch+1} with val_loss: {best_val_loss:.6f}")
+
+####################################################################################################################
+# SAVE LOSS HISTORY
+####################################################################################################################
+
+data = {
+    'Epoch': range(len(train_losses_list)),
+    'Train_Loss': train_losses_list,
+    'Val_Loss': val_losses_list
+}
+df = pd.DataFrame(data)
+df.to_csv(f'exp_nov/run{file_index}/losses.csv', index=False)
+print(f"Losses saved to exp_nov/run{file_index}/losses.csv")

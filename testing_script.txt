@@ -1,0 +1,201 @@
+
+# Improved LSTM Testing Script with Per-Output Denormalization
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import glob as glob
+import time
+
+####################################################################################################################
+# SLIDING WINDOW FUNCTION
+####################################################################################################################
+
+def sliding_windows(data, seq_length, stride):
+    x = []
+    for i in range(0, len(data) - seq_length + 1, stride):
+        _x = data[i:(i + seq_length)]
+        x.append(_x)
+    return np.array(x)
+
+####################################################################################################################
+# LOAD TEST DATA
+####################################################################################################################
+
+file_paths = glob.glob("test_files/FourGGCOutputAIop4_3200.csv")
+print(f"Testing on: {file_paths}")
+
+seq_length = 10
+stride = 1
+input_size = 7
+
+X_data = []
+Y_data = []
+X_test1 = []
+
+# Load the trained model checkpoint
+loaded_model = torch.load("exp_nov/run1/best_lstm.pt", map_location="cpu")
+
+# Extract normalization parameters (now vectors, not scalars)
+x_mean = loaded_model['input_means']
+x_std = loaded_model['input_stds']
+y_mean = loaded_model['output_means']  # shape (12,)
+y_std = loaded_model['output_stds']    # shape (12,)
+
+print(f"\nLoaded normalization parameters:")
+print(f"x_mean shape: {x_mean.shape}")
+print(f"x_std shape: {x_std.shape}")
+print(f"y_mean shape: {y_mean.shape}")
+print(f"y_std shape: {y_std.shape}")
+
+# Load test files
+for i in range(len(file_paths)):
+    training_set = pd.read_csv(file_paths[i], dtype=np.float32)
+
+    # Input features
+    features = training_set.iloc[:, [1, 2, 3, 4, 5, 6, 7]]
+
+    # Output targets: columns 8:20 (12 outputs) to match training
+    y = training_set.iloc[seq_length - 1:, 8:20].values
+    y = y[::stride]
+
+    x = sliding_windows(features.values, seq_length, stride)
+
+    X_data.append(x)
+    Y_data.append(y)
+    X_test1.append(features.values)
+
+X_test = np.concatenate(X_data, axis=0)
+y_test = np.concatenate(Y_data, axis=0)
+X_test1 = np.concatenate(X_test1, axis=0)
+
+print(f"\nTest data shape: {X_test.shape}")
+print(f"Test labels shape: {y_test.shape}")
+
+# Normalize test data using training statistics
+X_test_norm = (X_test - x_mean) / x_std
+X_test_norm = X_test_norm.reshape(X_test.shape[0], seq_length, input_size)
+
+####################################################################################################################
+# MODEL INFERENCE
+####################################################################################################################
+
+device = "cpu"
+model1 = loaded_model['model']
+model1.to(device)
+model1.eval()
+
+featuresTest = torch.from_numpy(X_test_norm).float()
+targetsTest = torch.from_numpy(y_test).float()
+
+print(f"\nRunning inference on {featuresTest.shape[0]} samples...")
+
+t1 = time.time()
+with torch.no_grad():
+    test_predict = model1(featuresTest)
+inference_time = (time.time() - t1) / featuresTest.shape[0]
+print(f"Inference time per sample: {inference_time*1000:.3f} ms")
+
+# Get predictions
+data_predict = test_predict.data.numpy()
+dataY_plot = targetsTest.data.numpy()
+
+# DENORMALIZE using per-output statistics (KEY FIX)
+data_predict_denorm = (data_predict * y_std) + y_mean
+dataY_plot_denorm = (y_test * y_std) + y_mean
+
+####################################################################################################################
+# CALCULATE ERRORS
+####################################################################################################################
+
+# Loss on normalized data
+criterion = nn.SmoothL1Loss()
+print(f"\n{'='*80}")
+print("OVERALL ERRORS (on normalized data)")
+print(f"{'='*80}")
+print(f"SmoothL1 Loss: {criterion(test_predict, targetsTest):.6f}")
+
+# Metrics on denormalized data
+print(f"\n{'='*80}")
+print("OVERALL METRICS (on original scale)")
+print(f"{'='*80}")
+r2 = r2_score(dataY_plot_denorm, data_predict_denorm)
+mse = mean_squared_error(dataY_plot_denorm, data_predict_denorm)
+rmse = np.sqrt(mse)
+mae = mean_absolute_error(dataY_plot_denorm, data_predict_denorm)
+
+print(f"R² Score: {r2:.6f}")
+print(f"MSE: {mse:.6f}")
+print(f"RMSE: {rmse:.6f}")
+print(f"MAE: {mae:.6f}")
+
+# Per-output errors
+output_names = [
+    'PIP_X1', 'PIP_Y1', 'PIP_X2', 'PIP_Y2', 
+    'PIP_X3', 'PIP_Y3', 'PIP_X4', 'PIP_Y4',
+    'TGT_TIME1', 'TGT_TIME2', 'TGT_TIME3', 'TGT_TIME4'
+]
+
+print(f"\n{'='*80}")
+print("INDIVIDUAL OUTPUT ERRORS (RMSE on original scale)")
+print(f"{'='*80}")
+print(f"{'Output':<15} {'RMSE':<15} {'MAE':<15} {'Mean True':<15} {'Std True':<15}")
+print(f"{'-'*80}")
+
+for i in range(12):
+    rmse_i = np.sqrt(mean_squared_error(dataY_plot_denorm[:, i], data_predict_denorm[:, i]))
+    mae_i = mean_absolute_error(dataY_plot_denorm[:, i], data_predict_denorm[:, i])
+    mean_true = dataY_plot_denorm[:, i].mean()
+    std_true = dataY_plot_denorm[:, i].std()
+    print(f"{output_names[i]:<15} {rmse_i:<15.4f} {mae_i:<15.4f} {mean_true:<15.4f} {std_true:<15.4f}")
+
+####################################################################################################################
+# VISUALIZATION
+####################################################################################################################
+
+fig, axs = plt.subplots(4, 3, figsize=(18, 16))
+axs = axs.flatten()
+
+downsample = 5  # Plot every 5th point for clarity
+
+for i in range(12):
+    axs[i].plot(dataY_plot_denorm[::downsample, i], label='Ground Truth', linewidth=2, alpha=0.7)
+    axs[i].plot(data_predict_denorm[::downsample, i], label='Predicted', linewidth=2, alpha=0.7)
+    axs[i].set_title(f'{output_names[i]}', fontsize=12, fontweight='bold')
+    axs[i].legend(loc='best')
+    axs[i].grid(True, alpha=0.3)
+    axs[i].set_xlabel('Sample Index')
+    axs[i].set_ylabel('Value')
+
+plt.tight_layout()
+plt.savefig('test_results_all_outputs.png', dpi=150, bbox_inches='tight')
+print(f"\nVisualization saved to: test_results_all_outputs.png")
+plt.show()
+
+####################################################################################################################
+# SAVE RESULTS
+####################################################################################################################
+
+# Save predictions
+header = "PIP_X1,PIP_Y1,PIP_X2,PIP_Y2,PIP_X3,PIP_Y3,PIP_X4,PIP_Y4,TGT_TIME1,TGT_TIME2,TGT_TIME3,TGT_TIME4"
+np.savetxt("predictions.csv", data_predict_denorm, delimiter=",", header=header, comments='')
+print(f"Predictions saved to: predictions.csv")
+
+# Save detailed results
+results_df = pd.DataFrame({
+    'Output': output_names,
+    'RMSE': [np.sqrt(mean_squared_error(dataY_plot_denorm[:, i], data_predict_denorm[:, i])) for i in range(12)],
+    'MAE': [mean_absolute_error(dataY_plot_denorm[:, i], data_predict_denorm[:, i]) for i in range(12)],
+    'Mean_True': [dataY_plot_denorm[:, i].mean() for i in range(12)],
+    'Std_True': [dataY_plot_denorm[:, i].std() for i in range(12)],
+})
+results_df.to_csv('detailed_results.csv', index=False)
+print(f"Detailed results saved to: detailed_results.csv")
+
+print(f"\n{'='*80}")
+print("TESTING COMPLETE!")
+print(f"{'='*80}")
